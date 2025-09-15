@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Board Vote — Vertical Alphabetical List</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: Arial, Helvetica, sans-serif; margin:20px; color:#222; }
+    h1 { margin-bottom:6px; }
+    .box { border:1px solid #ddd; padding:14px; border-radius:8px; background:#fbfbfb; margin-top:12px; }
+    .candidate-list div, .runoff-list div { margin:6px 0; } /* wrapper div for each checkbox */
+    button { padding:8px 12px; font-size:15px; cursor:pointer; margin-right:8px; }
+    .muted { color:#666; font-size:13px; }
+    .error { color:#b02020; }
+    .success { color:#0a7a0a; }
+    .hidden { display:none; }
+  </style>
+</head>
+<body>
+  <h1>Board Member Vote — Select Exactly 4</h1>
+  <p class="muted">6 board members will vote. Each voter must pick <strong>exactly 4</strong> candidates.</p>
+
+  <div class="box" id="initialBallotBox">
+    <form id="voteForm" aria-label="Initial ballot">
+      <fieldset id="candidateList" aria-label="Candidates"></fieldset>
+      <div style="margin-top:10px;">
+        <button type="submit">Submit Vote</button>
+        <button type="button" id="resetAll">Reset All Votes</button>
+        <span class="muted" style="margin-left:10px;">(Local session only — no backend.)</span>
+      </div>
+      <div id="voteMessage" class="muted" style="margin-top:8px;"></div>
+    </form>
+  </div>
+
+  <div style="margin-top:12px;">
+    <button id="showResults">Show Results / Check for Runoff</button>
+  </div>
+
+  <div id="results" class="box hidden" aria-live="polite"></div>
+  <div id="runoffArea" class="box hidden" aria-live="polite"></div>
+
+  <script>
+  (function () {
+    document.addEventListener('DOMContentLoaded', () => {
+      const CANDIDATES = ["Candidate A","Candidate B","Candidate C","Candidate D","Candidate E","Candidate F","Candidate G"];
+      const SEATS = 4;
+
+      let allVotes = [];
+      let currentRunoff = null;
+      let runoffRoundCounter = 0;
+
+      const candidateList = document.getElementById('candidateList');
+      const voteForm = document.getElementById('voteForm');
+      const voteMessage = document.getElementById('voteMessage');
+      const resetAllBtn = document.getElementById('resetAll');
+      const showResultsBtn = document.getElementById('showResults');
+      const resultsDiv = document.getElementById('results');
+      const runoffArea = document.getElementById('runoffArea');
+
+      // Create a checkbox inside a div to guarantee vertical layout
+      function mkCheckboxElement(name, value) {
+        const wrapper = document.createElement('div');
+        const label = document.createElement('label');
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.name = name;
+        cb.value = value;
+        cb.setAttribute('aria-label', value);
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(' ' + value));
+        wrapper.appendChild(label);
+        return wrapper;
+      }
+
+      function renderInitialCandidates() {
+        candidateList.innerHTML = '';
+        const sortedCands = CANDIDATES.slice().sort();
+        sortedCands.forEach(c => candidateList.appendChild(mkCheckboxElement('candidate', c)));
+        enforceLimitInContainer(voteForm, 'candidate', SEATS);
+      }
+
+      function enforceLimitInContainer(containerElement, checkboxName, limit) {
+        const boxes = Array.from(containerElement.querySelectorAll(`input[name="${checkboxName}"]`));
+        function update() {
+          const checked = boxes.filter(b => b.checked).length;
+          if (checked >= limit) boxes.forEach(b => { if (!b.checked) b.disabled = true; });
+          else boxes.forEach(b => b.disabled = false);
+        }
+        boxes.forEach(b => {
+          b.removeEventListener('__limit_update__', update);
+          b.addEventListener('change', update);
+        });
+        setTimeout(update, 0);
+      }
+
+      function tallyVotes(voteArrays, pool) {
+        const tally = {};
+        pool.forEach(c => tally[c] = 0);
+        voteArrays.flat().forEach(v => { if (tally.hasOwnProperty(v)) tally[v] += 1; });
+        return tally;
+      }
+
+      function sortTallyObj(tally) {
+        return Object.entries(tally).sort((a,b) => b[1] !== a[1] ? b[1]-a[1] : a[0].localeCompare(b[0]));
+      }
+
+      voteForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const selected = Array.from(voteForm.querySelectorAll('input[name="candidate"]:checked')).map(i => i.value);
+        if (selected.length !== SEATS) {
+          voteMessage.innerHTML = `<span class="error">Please select exactly ${SEATS} candidates.</span>`;
+          return;
+        }
+        allVotes.push(selected);
+        voteMessage.innerHTML = `<span class="success">Vote recorded. (${allVotes.length} total)</span>`;
+        voteForm.reset();
+        voteForm.querySelectorAll('input[name="candidate"]').forEach(b => b.disabled = false);
+        enforceLimitInContainer(voteForm, 'candidate', SEATS);
+      });
+
+      resetAllBtn.addEventListener('click', () => {
+        if (!confirm('Clear all votes and runoff history?')) return;
+        allVotes = [];
+        currentRunoff = null;
+        runoffArea.innerHTML = '';
+        runoffArea.classList.add('hidden');
+        resultsDiv.innerHTML = '';
+        resultsDiv.classList.add('hidden');
+        voteMessage.innerHTML = `<span class="muted">All votes cleared.</span>`;
+      });
+
+      showResultsBtn.addEventListener('click', () => { showResultsAndMaybeRunoff(); });
+
+      function showResultsAndMaybeRunoff() {
+        resultsDiv.classList.remove('hidden');
+        runoffArea.classList.add('hidden');
+        runoffArea.innerHTML = '';
+        currentRunoff = null;
+
+        if (allVotes.length === 0) { resultsDiv.innerHTML = '<p>No votes recorded yet.</p>'; return; }
+
+        const tally = tallyVotes(allVotes, CANDIDATES);
+        const sorted = sortTallyObj(tally);
+        let html = '<h2>Current Tally</h2><ol>';
+        sorted.forEach(([c,v]) => html += `<li>${c}: ${v} vote${v===1?'':'s'}</li>`);
+        html += '</ol>';
+
+        const cutoffVotes = sorted[SEATS-1][1];
+        const strictlyAbove = sorted.filter(([c,v]) => v > cutoffVotes).map(([c]) => c);
+        const tiedAtCutoff = sorted.filter(([c,v]) => v === cutoffVotes).map(([c]) => c);
+        const remainingSeats = SEATS - strictlyAbove.length;
+
+        html += `<p>Tied at cutoff (${tiedAtCutoff.length}): ${tiedAtCutoff.join(', ')}</p>`;
+        html += `<p>Remaining seats to fill from tied group: <strong>${remainingSeats}</strong></p>`;
+
+        if (tiedAtCutoff.length > remainingSeats) {
+          html += `<p class="error"><strong>Runoff required.</strong></p>`;
+          html += `<p><button id="startRunoffBtn">Start Runoff</button></p>`;
+          resultsDiv.innerHTML = html;
+          document.getElementById('startRunoffBtn').addEventListener('click', () => {
+            startRunoffRound(tiedAtCutoff, remainingSeats, strictlyAbove);
+          });
+          return;
+        }
+
+        const winners = sorted.slice(0, SEATS).map(([c]) => c);
+        html += `<p class="success"><strong>Final winners:</strong> ${winners.join(', ')}</p>`;
+        resultsDiv.innerHTML = html;
+      }
+
+      function startRunoffRound(tiedCandidates, seatsToFill, autoWinners) {
+        runoffRoundCounter += 1;
+        currentRunoff = { round: runoffRoundCounter, candidates:[...tiedCandidates], seatsToFill, votes:[], autoWinners: autoWinners? [...autoWinners]: [] };
+
+        runoffArea.classList.remove('hidden');
+        runoffArea.innerHTML = '';
+        let html = `<h2>Runoff Round ${currentRunoff.round}</h2>`;
+        html += `<p class="muted">Select exactly <strong>${seatsToFill}</strong> candidate(s) from: ${currentRunoff.candidates.join(', ')}</p>`;
+        runoffArea.innerHTML = html;
+
+        const form = document.createElement('form');
+        form.id = `runoffForm_r${currentRunoff.round}`;
+        form.className = 'runoff-form';
+        const cbName = `runoff_r${currentRunoff.round}`;
+
+        const sortedCands = currentRunoff.candidates.slice().sort();
+        const listDiv = document.createElement('div');
+        listDiv.className = 'runoff-list';
+        sortedCands.forEach(c => listDiv.appendChild(mkCheckboxElement(cbName, c)));
+        form.appendChild(listDiv);
+
+        const submitBtn = document.createElement('button'); submitBtn.type='submit'; submitBtn.textContent='Submit Runoff Vote';
+        const finishBtn = document.createElement('button'); finishBtn.type='button'; finishBtn.textContent='Finish Runoff & Compute Winners'; finishBtn.style.marginLeft='8px';
+        const info = document.createElement('div'); info.className='muted'; info.style.marginTop='10px';
+
+        form.appendChild(document.createElement('div')).appendChild(submitBtn);
+        form.appendChild(finishBtn);
+        form.appendChild(info);
+        runoffArea.appendChild(form);
+
+        enforceLimitInContainer(form, cbName, seatsToFill);
+
+        form.addEventListener('submit', (e) => {
+          e.preventDefault();
+          const chosen = Array.from(form.querySelectorAll(`input[name="${cbName}"]:checked`)).map(i => i.value);
+          if (chosen.length !== seatsToFill) { info.innerHTML = `<span class="error">Pick exactly ${seatsToFill} candidate(s).</span>`; return; }
+          currentRunoff.votes.push(chosen);
+          info.innerHTML = `<span class="success">Runoff vote recorded. (${currentRunoff.votes.length} votes)</span>`;
+          form.reset();
+          form.querySelectorAll(`input[name="${cbName}"]`).forEach(b => b.disabled=false);
+          enforceLimitInContainer(form, cbName, seatsToFill);
+        });
+
+        finishBtn.addEventListener('click', () => { computeRunoffOutcome(); });
+      }
+
+      function computeRunoffOutcome() {
+        if (!currentRunoff) { alert('No active runoff round.'); return; }
+        const { candidates, seatsToFill, votes, autoWinners, round } = currentRunoff;
+        const tally = tallyVotes(votes, candidates);
+        const sorted = sortTallyObj(tally);
+
+        let html = `<h3>Runoff Round ${round} Results</h3>`;
+        if (sorted.length === 0) { html += '<p class="error">No votes collected this round.</p>'; runoffArea.innerHTML=html; return; }
+        html += '<ol>'; sorted.forEach(([c,v])=>html+=`<li>${c}: ${v} vote${v===1?'':'s'}</li>`); html+='</ol>';
+
+        const cutoffIndex = Math.min(seatsToFill-1, sorted.length-1);
+        const cutoffVotes = sorted[cutoffIndex][1];
+        const strictlyAbove = sorted.filter(([c,v])=>v>cutoffVotes).map(([c])=>c);
+        const tiedAtCutoff = sorted.filter(([c,v])=>v===cutoffVotes).map(([c])=>c);
+        const remainingSeats = seatsToFill - strictlyAbove.length;
+
+        html += `<p>Tied at cutoff (${tiedAtCutoff.length}): ${tiedAtCutoff.join(', ')}</p>`;
+        html += `<p>Remaining seats from this runoff: <strong>${remainingSeats}</strong></p>`;
+
+        if (tiedAtCutoff.length > remainingSeats) {
+          html += `<p class="error"><strong>Tie persists.</strong></p>`;
+          html += `<p><button id="startAnotherRunoff">Start Another Runoff</button></p>`;
+          runoffArea.innerHTML = html;
+          document.getElementById('startAnotherRunoff').addEventListener('click', () => {
+            const nextAutoWinners = autoWinners.concat(strictlyAbove);
+            startRunoffRound(tiedAtCutoff, remainingSeats, nextAutoWinners);
+          });
+          return;
+        }
+
+        const winnersFromRunoff = strictlyAbove.concat(tiedAtCutoff).slice(0,seatsToFill);
+        const finalWinners = autoWinners.concat(winnersFromRunoff).slice(0,SEATS);
+        html += `<p class="success"><strong>Final winners:</strong> ${finalWinners.join(', ')}</p>`;
+        runoffArea.innerHTML = html;
+        resultsDiv.classList.remove('hidden');
+        resultsDiv.innerHTML = `<h2>Final winners</h2><p class="success"><strong>${finalWinners.join(', ')}</strong></p>`;
+        currentRunoff=null;
+      }
+
+      renderInitialCandidates();
+    });
+  })();
+  </script>
+</body>
+</html>
